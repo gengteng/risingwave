@@ -247,10 +247,6 @@ pub struct HashJoinExecutor<K: HashKey, S: StateStore, const T: JoinTypePrimitiv
     cond: Option<BoxedExpression>,
     /// Column indices of watermark output and offset expression of each inequality, respectively.
     inequality_pairs: Vec<(Vec<usize>, Option<BoxedExpression>)>,
-    /// The output watermark of each inequality condition and its value is the minimum of the
-    /// calculation result of both side. It will be used to generate watermark into downstream
-    /// and do state cleaning if `clean_state` field of that inequality is `true`.
-    inequality_watermarks: Vec<Option<Watermark>>,
     /// Identity string
     identity: String,
 
@@ -269,6 +265,11 @@ pub struct HashJoinExecutor<K: HashKey, S: StateStore, const T: JoinTypePrimitiv
 
     /// watermark column index -> `BufferedWatermarks`
     watermark_buffers: BTreeMap<usize, BufferedWatermarks<SideTypePrimitive>>,
+
+    /// The most recent output watermark of each join condition and its value is the minimum of the
+    /// calculation result of both side. It might be used to generate watermark into downstream
+    /// or do state cleaning.
+    current_watermarks: Vec<Option<Watermark>>,
 }
 
 impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> std::fmt::Debug
@@ -611,8 +612,8 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> HashJoinExecutor<K, 
             r_state_clean_columns.clear();
         }
 
-        let inequality_watermarks = vec![None; inequality_pairs.len()];
         let watermark_buffers = BTreeMap::new();
+        let current_watermarks = vec![None; join_key_indices_l.len() + inequality_pairs.len()];
 
         Self {
             ctx: ctx.clone(),
@@ -677,7 +678,6 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> HashJoinExecutor<K, 
             pk_indices,
             cond,
             inequality_pairs,
-            inequality_watermarks,
             identity: format!("HashJoinExecutor {:X}", executor_id),
             op_info,
             append_only_optimize,
@@ -685,6 +685,7 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> HashJoinExecutor<K, 
             chunk_size,
             cnt_rows_received: 0,
             watermark_buffers,
+            current_watermarks,
         }
     }
 
@@ -744,7 +745,7 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> HashJoinExecutor<K, 
                         &mut self.side_r,
                         &self.actual_output_data_types,
                         &mut self.cond,
-                        &self.inequality_watermarks,
+                        &self.current_watermarks,
                         chunk,
                         self.append_only_optimize,
                         self.chunk_size,
@@ -771,7 +772,7 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> HashJoinExecutor<K, 
                         &mut self.side_r,
                         &self.actual_output_data_types,
                         &mut self.cond,
-                        &self.inequality_watermarks,
+                        &self.current_watermarks,
                         chunk,
                         self.append_only_optimize,
                         self.chunk_size,
@@ -797,7 +798,7 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> HashJoinExecutor<K, 
                             self.watermark_buffers
                                 .values_mut()
                                 .for_each(|buffers| buffers.clear());
-                            self.inequality_watermarks.fill(None);
+                            self.current_watermarks.fill(None);
                         }
                         self.side_r.ht.update_vnode_bitmap(vnode_bitmap);
                     }
@@ -870,11 +871,6 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> HashJoinExecutor<K, 
             (&mut self.side_r, &mut self.side_l)
         };
 
-        // State cleaning
-        if side_update.join_key_indices[0] == watermark.col_idx {
-            side_match.ht.update_watermark(watermark.val.clone());
-        }
-
         // Select watermarks to yield.
         let wm_in_jk = side_update
             .join_key_indices
@@ -902,6 +898,16 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> HashJoinExecutor<K, 
                 for output_idx in output_indices {
                     watermarks_to_emit.push(selected_watermark.clone().with_idx(*output_idx));
                 }
+                // State cleaning
+                if idx == 0 {
+                    side_update
+                        .ht
+                        .update_watermark(selected_watermark.val.clone());
+                    side_match
+                        .ht
+                        .update_watermark(selected_watermark.val.clone());
+                }
+                self.current_watermarks[idx] = Some(selected_watermark);
             };
         }
         for (inequality_index, need_offset) in
@@ -932,7 +938,8 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> HashJoinExecutor<K, 
                 for output_idx in &self.inequality_pairs[*inequality_index].0 {
                     watermarks_to_emit.push(selected_watermark.clone().with_idx(*output_idx));
                 }
-                self.inequality_watermarks[*inequality_index] = Some(selected_watermark);
+                self.current_watermarks[side_update.join_key_indices.len() + inequality_index] =
+                    Some(selected_watermark);
             }
         }
         Ok(watermarks_to_emit)
@@ -977,7 +984,7 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> HashJoinExecutor<K, 
         side_r: &'a mut JoinSide<K, S>,
         actual_output_data_types: &'a [DataType],
         cond: &'a mut Option<BoxedExpression>,
-        inequality_watermarks: &'a [Option<Watermark>],
+        current_watermarks: &'a [Option<Watermark>],
         chunk: StreamChunk,
         append_only_optimize: bool,
         chunk_size: usize,
@@ -995,7 +1002,7 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> HashJoinExecutor<K, 
             .state_clean_columns
             .iter()
             .filter_map(|(column_idx, inequality_index)| {
-                inequality_watermarks[*inequality_index]
+                current_watermarks[side_update.join_key_indices.len() + inequality_index]
                     .as_ref()
                     .map(|watermark| (*column_idx, watermark))
             })
