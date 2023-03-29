@@ -1,4 +1,4 @@
-from grafanalib.core import Dashboard, TimeSeries, Target, GridPos, RowPanel, Time, Templating
+from grafanalib.core import Dashboard, TimeSeries, Target, GridPos, RowPanel, Time, Templating, Table
 import logging
 import os
 
@@ -95,6 +95,13 @@ class Panels:
                       legendFormat=legendFormat,
                       datasource=self.datasource,
                       hide=hide)
+
+    def table_target(self, expr, hide=False):
+        return Target(expr=expr,
+                      datasource=self.datasource,
+                      hide=hide,
+                      instant=True,
+                      format='table')
 
     def timeseries(self, title, description, targets):
         gridPos = self.layout.next_half_width_graph()
@@ -382,10 +389,10 @@ class Panels:
         )
 
     def timeseries_bytesps(self,
-                          title,
-                          description,
-                          targets,
-                          legendCols=["mean"]):
+                           title,
+                           description,
+                           targets,
+                           legendCols=["mean"]):
         gridPos = self.layout.next_half_width_graph()
         return TimeSeries(
             title=title,
@@ -457,6 +464,21 @@ class Panels:
             legendPlacement="right",
         )
 
+    def table_info(self, title, description, targets, excluded_columns):
+        gridPos = self.layout.next_half_width_graph()
+        excludedByName = dict.fromkeys(excluded_columns, True)
+        transformations = [{"id": "organize", "options": {
+            "excludeByName": excludedByName}}]
+        return Table(
+            title=title,
+            description=description,
+            targets=targets,
+            gridPos=gridPos,
+            showHeader=True,
+            filterable=True,
+            transformations=transformations
+        )
+
     def sub_panel(self):
         return Panels(self.datasource)
 
@@ -490,6 +512,20 @@ def quantile(f, percentiles):
     return list(
         map(lambda p: f(quantile_map[str(p)][0], quantile_map[str(p)][1]),
             percentiles))
+
+
+def section_actor_info(panels):
+    excluded_cols = ['Time', 'Value', '__name__', 'job']
+    return [
+        panels.row("Actor/Table Id Info"),
+        panels.table_info("Actor Id Info",
+                          "Mapping from actor id to fragment id",
+                          [panels.table_target(f"last_over_time({metric('actor_id_info')}[10y])")], excluded_cols),
+        panels.table_info("Table Id Info",
+                          "Mapping from table id to actor id and table name",
+                          [panels.table_target(f"last_over_time({metric('state_table_id_info')}[10y])")], excluded_cols)
+
+    ]
 
 
 def section_cluster_node(panels):
@@ -794,7 +830,7 @@ def section_compaction(outer_panels):
                     ],
                 ),
 
-                 panels.timeseries_count(
+                panels.timeseries_count(
                     "Hummock Sstable Stat",
                     "Avg count gotten from sstable_distinct_epoch_count, for observing sstable_distinct_epoch_count",
                     [
@@ -808,7 +844,7 @@ def section_compaction(outer_panels):
                 panels.timeseries_latency(
                     "Hummock Remote Read Duration",
                     "Total time of operations which read from remote storage when enable prefetch",
-                    [                       
+                    [
                         *quantile(
                             lambda quantile, legend: panels.target(
                                 f"histogram_quantile({quantile}, sum(rate({metric('state_store_remote_read_time_per_task_bucket')}[$__rate_interval])) by (le, job, instance, table_id))",
@@ -1596,6 +1632,7 @@ def section_batch_exchange(outer_panels):
         ),
     ]
 
+
 def section_frontend(outer_panels):
     panels = outer_panels.sub_panel()
     return [
@@ -1627,7 +1664,7 @@ def section_frontend(outer_panels):
                     "",
                     [
                         panels.target(f"{metric('distributed_running_query_num')}",
-                            "The number of running query in distributed execution mode"),
+                                      "The number of running query in distributed execution mode"),
                     ],
                     ["last"],
                 ),
@@ -1636,7 +1673,7 @@ def section_frontend(outer_panels):
                     "",
                     [
                         panels.target(f"{metric('distributed_rejected_query_counter')}",
-                            "The number of rejected query in distributed execution mode"),
+                                      "The number of rejected query in distributed execution mode"),
                     ],
                     ["last"],
                 ),
@@ -1645,7 +1682,7 @@ def section_frontend(outer_panels):
                     "",
                     [
                         panels.target(f"{metric('distributed_completed_query_counter')}",
-                            "The number of completed query in distributed execution mode"),
+                                      "The number of completed query in distributed execution mode"),
                     ],
                     ["last"],
                 ),
@@ -2183,6 +2220,7 @@ def section_hummock_tiered_cache(outer_panels):
         )
     ]
 
+
 def section_hummock_manager(outer_panels):
     panels = outer_panels.sub_panel()
     total_key_size_filter = "metric='total_key_size'"
@@ -2308,6 +2346,7 @@ def section_hummock_manager(outer_panels):
         )
     ]
 
+
 def section_backup_manager(outer_panels):
     panels = outer_panels.sub_panel()
     return [
@@ -2333,7 +2372,7 @@ def section_backup_manager(outer_panels):
                                 f"histogram_quantile({quantile}, sum(rate({metric('backup_job_latency_bucket')}[$__rate_interval])) by (le, state))",
                                 f"Job Process Time p{legend}" +
                                 " - {{state}}",
-                                ),
+                            ),
                             [50, 99, 999, "max"],
                         ),
                     ],
@@ -2341,6 +2380,7 @@ def section_backup_manager(outer_panels):
             ],
         )
     ]
+
 
 def grpc_metrics_target(panels, name, filter):
     return panels.timeseries_latency_small(
@@ -2583,6 +2623,7 @@ def section_grpc_hummock_meta_client(outer_panels):
         ),
     ]
 
+
 def section_memory_manager(outer_panels):
     panels = outer_panels.sub_panel()
     return [
@@ -2653,6 +2694,7 @@ def section_memory_manager(outer_panels):
         ),
     ]
 
+
 def section_connector_node(outer_panels):
     panels = outer_panels.sub_panel()
     return [
@@ -2672,6 +2714,7 @@ def section_connector_node(outer_panels):
             ],
         )
     ]
+
 
 templating = Templating()
 if namespace_filter_enabled:
@@ -2711,6 +2754,7 @@ dashboard = Dashboard(
     templating=templating,
     version=dashboard_version,
     panels=[
+        *section_actor_info(panels),
         *section_cluster_node(panels),
         *section_streaming(panels),
         *section_streaming_actors(panels),
