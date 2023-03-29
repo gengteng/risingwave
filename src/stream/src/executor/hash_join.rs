@@ -29,6 +29,7 @@ use risingwave_common::row::{OwnedRow, Row};
 use risingwave_common::types::{DataType, ToOwnedDatum};
 use risingwave_common::util::epoch::EpochPair;
 use risingwave_common::util::iter_util::ZipEqDebug;
+use risingwave_common::util::value_encoding::ValueRowSerde;
 use risingwave_expr::expr::BoxedExpression;
 use risingwave_expr::ExprError;
 use risingwave_storage::StateStore;
@@ -43,7 +44,8 @@ use super::{
     ActorContextRef, BoxedExecutor, BoxedMessageStream, Executor, Message, PkIndices, PkIndicesRef,
     Watermark,
 };
-use crate::common::table::state_table::StateTable;
+use crate::common::table::state_table::StateTableInner;
+use crate::common::table::WatermarkBufferStrategy;
 use crate::common::StreamChunkBuilder;
 use crate::executor::expect_first_barrier_from_aligned_stream;
 use crate::executor::JoinType::LeftAnti;
@@ -159,9 +161,9 @@ impl JoinParams {
     }
 }
 
-struct JoinSide<K: HashKey, S: StateStore> {
+struct JoinSide<K: HashKey, S: StateStore, SD: ValueRowSerde, W: WatermarkBufferStrategy> {
     /// Store all data from a one side stream
-    ht: JoinHashMap<K, S>,
+    ht: JoinHashMap<K, S, SD, W>,
     /// Indices of the join key columns
     join_key_indices: Vec<usize>,
     /// The primary key indices of state table on this side after dedup
@@ -188,7 +190,9 @@ struct JoinSide<K: HashKey, S: StateStore> {
     need_degree_table: bool,
 }
 
-impl<K: HashKey, S: StateStore> std::fmt::Debug for JoinSide<K, S> {
+impl<K: HashKey, S: StateStore, SD: ValueRowSerde, W: WatermarkBufferStrategy> std::fmt::Debug
+    for JoinSide<K, S, SD, W>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JoinSide")
             .field("join_key_indices", &self.join_key_indices)
@@ -201,7 +205,9 @@ impl<K: HashKey, S: StateStore> std::fmt::Debug for JoinSide<K, S> {
     }
 }
 
-impl<K: HashKey, S: StateStore> JoinSide<K, S> {
+impl<K: HashKey, S: StateStore, SD: ValueRowSerde, W: WatermarkBufferStrategy>
+    JoinSide<K, S, SD, W>
+{
     // WARNING: Please do not call this until we implement it.、
     #[expect(dead_code)]
     fn is_dirty(&self) -> bool {
@@ -226,7 +232,13 @@ impl<K: HashKey, S: StateStore> JoinSide<K, S> {
 
 /// `HashJoinExecutor` takes two input streams and runs equal hash join on them.
 /// The output columns are the concatenation of left and right columns.
-pub struct HashJoinExecutor<K: HashKey, S: StateStore, const T: JoinTypePrimitive> {
+pub struct HashJoinExecutor<
+    K: HashKey,
+    S: StateStore,
+    const T: JoinTypePrimitive,
+    SD: ValueRowSerde,
+    W: WatermarkBufferStrategy,
+> {
     ctx: ActorContextRef,
 
     /// Left input executor
@@ -240,9 +252,9 @@ pub struct HashJoinExecutor<K: HashKey, S: StateStore, const T: JoinTypePrimitiv
     /// The primary key indices of the schema
     pk_indices: PkIndices,
     /// The parameters of the left join executor
-    side_l: JoinSide<K, S>,
+    side_l: JoinSide<K, S, SD, W>,
     /// The parameters of the right join executor
-    side_r: JoinSide<K, S>,
+    side_r: JoinSide<K, S, SD, W>,
     /// Optional non-equi join conditions
     cond: Option<BoxedExpression>,
     /// Column indices of watermark output and offset expression of each inequality, respectively.
@@ -272,8 +284,13 @@ pub struct HashJoinExecutor<K: HashKey, S: StateStore, const T: JoinTypePrimitiv
     current_watermarks: Vec<Option<Watermark>>,
 }
 
-impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> std::fmt::Debug
-    for HashJoinExecutor<K, S, T>
+impl<
+        K: HashKey,
+        S: StateStore,
+        const T: JoinTypePrimitive,
+        SD: ValueRowSerde,
+        W: WatermarkBufferStrategy,
+    > std::fmt::Debug for HashJoinExecutor<K, S, T, SD, W>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HashJoinExecutor")
@@ -289,7 +306,14 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> std::fmt::Debug
     }
 }
 
-impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> Executor for HashJoinExecutor<K, S, T> {
+impl<
+        K: HashKey,
+        S: StateStore,
+        const T: JoinTypePrimitive,
+        SD: ValueRowSerde,
+        W: WatermarkBufferStrategy,
+    > Executor for HashJoinExecutor<K, S, T, SD, W>
+{
     fn execute(self: Box<Self>) -> BoxedMessageStream {
         self.into_stream().boxed()
     }
@@ -426,7 +450,14 @@ impl<const T: JoinTypePrimitive, const SIDE: SideTypePrimitive> HashJoinChunkBui
     }
 }
 
-impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> HashJoinExecutor<K, S, T> {
+impl<
+        K: HashKey,
+        S: StateStore,
+        const T: JoinTypePrimitive,
+        SD: ValueRowSerde,
+        W: WatermarkBufferStrategy,
+    > HashJoinExecutor<K, S, T, SD, W>
+{
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: ActorContextRef,
@@ -441,10 +472,10 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> HashJoinExecutor<K, 
         cond: Option<BoxedExpression>,
         inequality_pairs: Vec<(usize, usize, bool, Option<BoxedExpression>)>,
         op_info: String,
-        state_table_l: StateTable<S>,
-        degree_state_table_l: StateTable<S>,
-        state_table_r: StateTable<S>,
-        degree_state_table_r: StateTable<S>,
+        state_table_l: StateTableInner<S, SD, W>,
+        degree_state_table_l: StateTableInner<S, SD, W>,
+        state_table_r: StateTableInner<S, SD, W>,
+        degree_state_table_r: StateTableInner<S, SD, W>,
         watermark_epoch: AtomicU64Ref,
         is_append_only: bool,
         metrics: Arc<StreamingMetrics>,
@@ -848,8 +879,8 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> HashJoinExecutor<K, 
 
     // We need to manually evict the cache.
     fn evict_cache(
-        side_update: &mut JoinSide<K, S>,
-        side_match: &mut JoinSide<K, S>,
+        side_update: &mut JoinSide<K, S, SD, W>,
+        side_match: &mut JoinSide<K, S, SD, W>,
         cnt_rows_received: &mut u32,
     ) {
         *cnt_rows_received += 1;
@@ -949,7 +980,7 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> HashJoinExecutor<K, 
     /// data chunk with the executor state
     async fn hash_eq_match(
         key: &K,
-        ht: &mut JoinHashMap<K, S>,
+        ht: &mut JoinHashMap<K, S, SD, W>,
     ) -> StreamExecutorResult<Option<HashValueType>> {
         if !key.null_bitmap().is_subset(ht.null_matched()) {
             Ok(None)
@@ -980,8 +1011,8 @@ impl<K: HashKey, S: StateStore, const T: JoinTypePrimitive> HashJoinExecutor<K, 
     async fn eq_join_oneside<'a, const SIDE: SideTypePrimitive>(
         ctx: &'a ActorContextRef,
         identity: &'a str,
-        side_l: &'a mut JoinSide<K, S>,
-        side_r: &'a mut JoinSide<K, S>,
+        side_l: &'a mut JoinSide<K, S, SD, W>,
+        side_r: &'a mut JoinSide<K, S, SD, W>,
         actual_output_data_types: &'a [DataType],
         cond: &'a mut Option<BoxedExpression>,
         current_watermarks: &'a [Option<Watermark>],
@@ -1238,11 +1269,13 @@ mod tests {
     use risingwave_common::hash::{Key128, Key64};
     use risingwave_common::types::ScalarImpl;
     use risingwave_common::util::sort_util::OrderType;
+    use risingwave_common::util::value_encoding::BasicSerde;
     use risingwave_expr::expr::build_from_pretty;
     use risingwave_storage::memory::MemoryStateStore;
 
     use super::*;
-    use crate::common::table::state_table::StateTable;
+    use crate::common::table::state_table::StateTableInner;
+    use crate::common::table::WatermarkBufferByEpoch;
     use crate::executor::test_utils::{MessageSender, MockSource, StreamExecutorTestExt};
     use crate::executor::{ActorContext, Barrier, EpochPair};
 
@@ -1252,13 +1285,16 @@ mod tests {
         order_types: &[OrderType],
         pk_indices: &[usize],
         table_id: u32,
-    ) -> (StateTable<MemoryStateStore>, StateTable<MemoryStateStore>) {
+    ) -> (
+        StateTableInner<MemoryStateStore, BasicSerde, WatermarkBufferByEpoch<1>>,
+        StateTableInner<MemoryStateStore, BasicSerde, WatermarkBufferByEpoch<1>>,
+    ) {
         let column_descs = data_types
             .iter()
             .enumerate()
             .map(|(id, data_type)| ColumnDesc::unnamed(ColumnId::new(id as i32), data_type.clone()))
             .collect_vec();
-        let state_table = StateTable::new_without_distribution(
+        let state_table = StateTableInner::<MemoryStateStore, BasicSerde, WatermarkBufferByEpoch<1>>::new_without_distribution(
             mem_state.clone(),
             TableId::new(table_id),
             column_descs,
@@ -1279,7 +1315,11 @@ mod tests {
             ColumnId::new(pk_indices.len() as i32),
             DataType::Int64,
         ));
-        let degree_state_table = StateTable::new_without_distribution(
+        let degree_state_table = StateTableInner::<
+            MemoryStateStore,
+            BasicSerde,
+            WatermarkBufferByEpoch<1>,
+        >::new_without_distribution(
             mem_state,
             TableId::new(table_id + 1),
             degree_table_column_descs,
@@ -1342,7 +1382,13 @@ mod tests {
             _ => source_l.schema().len() + source_r.schema().len(),
         };
 
-        let executor = HashJoinExecutor::<Key64, MemoryStateStore, T>::new(
+        let executor = HashJoinExecutor::<
+            Key64,
+            MemoryStateStore,
+            T,
+            BasicSerde,
+            WatermarkBufferByEpoch<1>,
+        >::new(
             ActorContext::create(123),
             Box::new(source_l),
             Box::new(source_r),
@@ -1424,7 +1470,13 @@ mod tests {
             _ => source_l.schema().len() + source_r.schema().len(),
         };
 
-        let executor = HashJoinExecutor::<Key128, MemoryStateStore, T>::new(
+        let executor = HashJoinExecutor::<
+            Key128,
+            MemoryStateStore,
+            T,
+            BasicSerde,
+            WatermarkBufferByEpoch<1>,
+        >::new(
             ActorContext::create(123),
             Box::new(source_l),
             Box::new(source_r),
