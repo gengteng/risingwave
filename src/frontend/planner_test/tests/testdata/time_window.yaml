@@ -210,3 +210,60 @@
   batch_plan: |
     BatchProject { exprs: [*VALUES*_0.column_0, TumbleStart(*VALUES*_0.column_0, '00:00:10':Interval) as $expr1, (TumbleStart(*VALUES*_0.column_0, '00:00:10':Interval) + '00:00:10':Interval) as $expr2] }
     └─BatchValues { rows: [['2020-01-01 12:00:00':Timestamp]] }
+- sql: |
+    create table t1 ( c1 varchar, c2 int, c3 timestamp);
+    create table t2 ( d1 int, d2 varchar, d3 timestamp);
+    create index idx_t1 on t1(c2) include (c1, c2, c3);
+    select * from t2 inner join hop(t1,  c3, interval '10 minute',interval '20 minute')  on t2.d1 = t1.c2;
+  logical_plan: |
+    LogicalProject { exprs: [t2.d1, t2.d2, t2.d3, t1.c1, t1.c2, t1.c3, window_start, window_end] }
+    └─LogicalJoin { type: Inner, on: (t2.d1 = t1.c2), output: all }
+      ├─LogicalScan { table: t2, columns: [t2.d1, t2.d2, t2.d3, t2._row_id] }
+      └─LogicalHopWindow { time_col: t1.c3, slide: 00:10:00, size: 00:20:00, output: all }
+        └─LogicalFilter { predicate: IsNotNull(t1.c3) }
+          └─LogicalScan { table: t1, columns: [t1.c1, t1.c2, t1.c3, t1._row_id] }
+  optimized_logical_plan_for_batch: |
+    LogicalHopWindow { time_col: t1.c3, slide: 00:10:00, size: 00:20:00, output: all }
+    └─LogicalFilter { predicate: IsNotNull(t1.c3) }
+      └─LogicalJoin { type: Inner, on: (t2.d1 = t1.c2), output: all }
+        ├─LogicalScan { table: t2, columns: [t2.d1, t2.d2, t2.d3] }
+        └─LogicalScan { table: t1, columns: [t1.c1, t1.c2, t1.c3], predicate: IsNotNull(t1.c3) }
+  batch_plan: |
+    BatchHopWindow { time_col: idx_t1.c3, slide: 00:10:00, size: 00:20:00, output: all }
+    └─BatchExchange { order: [], dist: Single }
+      └─BatchFilter { predicate: IsNotNull(idx_t1.c3) }
+        └─BatchLookupJoin { type: Inner, predicate: t2.d1 = idx_t1.c2 AND IsNotNull(idx_t1.c3), output: all }
+          └─BatchExchange { order: [], dist: UpstreamHashShard(t2.d1) }
+            └─BatchScan { table: t2, columns: [t2.d1, t2.d2, t2.d3], distribution: SomeShard }
+- sql: |
+    create table t1 ( c1 varchar, c2 int, c3 timestamp);
+    create table t2 ( d1 int, d2 varchar, d3 timestamp);
+    create index idx_t1 on t1(c2) include (c1, c2, c3);
+    select * from hop(t2,  d3, interval '10 minute',interval '20 minute') inner join hop(t1,  c3, interval '10 minute',interval '20 minute')  on t2.d1 = t1.c2;
+  logical_plan: |
+    LogicalProject { exprs: [t2.d1, t2.d2, t2.d3, window_start, window_end, t1.c1, t1.c2, t1.c3, window_start, window_end] }
+    └─LogicalJoin { type: Inner, on: (t2.d1 = t1.c2), output: all }
+      ├─LogicalHopWindow { time_col: t2.d3, slide: 00:10:00, size: 00:20:00, output: all }
+      | └─LogicalFilter { predicate: IsNotNull(t2.d3) }
+      |   └─LogicalScan { table: t2, columns: [t2.d1, t2.d2, t2.d3, t2._row_id] }
+      └─LogicalHopWindow { time_col: t1.c3, slide: 00:10:00, size: 00:20:00, output: all }
+        └─LogicalFilter { predicate: IsNotNull(t1.c3) }
+          └─LogicalScan { table: t1, columns: [t1.c1, t1.c2, t1.c3, t1._row_id] }
+  optimized_logical_plan_for_stream: |
+    LogicalHopWindow { time_col: t1.c3, slide: 00:10:00, size: 00:20:00, output: [t2.d1, t2.d2, t2.d3, window_start, window_end, t1.c1, t1.c2, t1.c3, window_start, window_end] }
+    └─LogicalFilter { predicate: IsNotNull(t1.c3) }
+      └─LogicalHopWindow { time_col: t2.d3, slide: 00:10:00, size: 00:20:00, output: all }
+        └─LogicalFilter { predicate: IsNotNull(t2.d3) }
+          └─LogicalJoin { type: Inner, on: (t2.d1 = t1.c2), output: all }
+            ├─LogicalScan { table: t2, columns: [t2.d1, t2.d2, t2.d3], predicate: IsNotNull(t2.d3) }
+            └─LogicalScan { table: t1, columns: [t1.c1, t1.c2, t1.c3], predicate: IsNotNull(t1.c3) }
+  batch_plan: |
+    BatchHopWindow { time_col: idx_t1.c3, slide: 00:10:00, size: 00:20:00, output: [t2.d1, t2.d2, t2.d3, window_start, window_end, idx_t1.c1, idx_t1.c2, idx_t1.c3, window_start, window_end] }
+    └─BatchExchange { order: [], dist: Single }
+      └─BatchFilter { predicate: IsNotNull(idx_t1.c3) }
+        └─BatchHopWindow { time_col: t2.d3, slide: 00:10:00, size: 00:20:00, output: all }
+          └─BatchFilter { predicate: IsNotNull(t2.d3) }
+            └─BatchLookupJoin { type: Inner, predicate: t2.d1 = idx_t1.c2 AND IsNotNull(idx_t1.c3), output: all }
+              └─BatchExchange { order: [], dist: UpstreamHashShard(t2.d1) }
+                └─BatchFilter { predicate: IsNotNull(t2.d3) }
+                  └─BatchScan { table: t2, columns: [t2.d1, t2.d2, t2.d3], distribution: SomeShard }
