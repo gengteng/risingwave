@@ -74,6 +74,16 @@ impl Int256 {
     pub fn to_le_bytes(self) -> [u8; mem::size_of::<I256>()] {
         self.0.to_le_bytes()
     }
+
+    #[inline]
+    pub fn to_ne_bytes(self) -> [u8; mem::size_of::<I256>()] {
+        self.0.to_ne_bytes()
+    }
+
+    #[inline]
+    pub fn from_ne_bytes(bytes: [u8; mem::size_of::<Self>()]) -> Self {
+        Int256(I256::from_ne_bytes(bytes))
+    }
 }
 
 /// Implement `Scalar` for `Int256`.
