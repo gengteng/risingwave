@@ -677,7 +677,7 @@ where
     ) -> MetaResult<()> {
         let mut broker_rewrite_map = HashMap::new();
         const UPSTREAM_SOURCE_PRIVATE_LINK_KEY: &str = "private.links";
-        const PRIVATE_LINK_SERVICE_NAME: &str = "service.name";
+        const PRIVATE_LINK_SERVICE_NAME: &str = "privatelink.name";
         if let Some(prop) = properties.get(UPSTREAM_SOURCE_PRIVATE_LINK_KEY) {
             if !is_kafka_connector(properties) {
                 return Err(MetaError::from(anyhow!(
