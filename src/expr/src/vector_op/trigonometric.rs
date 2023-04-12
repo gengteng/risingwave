@@ -66,9 +66,49 @@ pub fn radians_f64(input: F64) -> F64 {
     input.0.to_radians().into()
 }
 
+#[function("sind(float64) -> float64")]
+pub fn sind_f64(input: F64) -> F64 {
+    f64::sin(input.0.to_radians()).into()
+}
+
+#[function("cosd(float64) -> float64")]
+pub fn cosd_f64(input: F64) -> F64 {
+    f64::cos(input.0.to_radians()).into()
+}
+
+#[function("tand(float64) -> float64")]
+pub fn tand_f64(input: F64) -> F64 {
+    f64::tan(input.0.to_radians()).into()
+}
+
+#[function("cotd(float64) -> float64")]
+pub fn cotd_f64(input: F64) -> F64 {
+    let res = 1.0 / f64::tan(input.0.to_radians());
+    res.into()
+}
+
+#[function("asind(float64) -> float64")]
+pub fn asind_f64(input: F64) -> F64 {
+    f64::asin(input.0).to_degrees().into()
+}
+
+#[function("acosd(float64) -> float64")]
+pub fn acosd_f64(input: F64) -> F64 {
+    f64::acos(input.0).to_degrees().into()
+}
+
+#[function("atand(float64) -> float64")]
+pub fn atand_f64(input: F64) -> F64 {
+    f64::atan(input.0).to_degrees().into()
+}
+
+#[function("atan2d(float64, float64) -> float64")]
+pub fn atan2d_f64(input_x: F64, input_y: F64) -> F64 {
+    input_x.0.atan2(input_y.0).to_degrees().into()
+}
+
 #[cfg(test)]
 mod tests {
-
     use risingwave_common::types::F64;
 
     use crate::vector_op::trigonometric::*;
@@ -76,7 +116,7 @@ mod tests {
     /// numbers are equal within a rounding error
     fn assert_similar(lhs: F64, rhs: F64) {
         let x = F64::from(lhs.abs() - rhs.abs()).abs() <= 0.000000000000001;
-        assert!(x);
+        assert!(x, "{lhs} is not similar to {rhs}");
     }
 
     #[test]
@@ -135,5 +175,41 @@ mod tests {
         let zero = F64::from(0);
         assert_similar(degrees_f64(zero), zero);
         assert_similar(radians_f64(zero), zero);
+    }
+
+    #[test]
+    fn test_trigonometric_degree_funcs() {
+        // from https://en.wikipedia.org/wiki/Trigonometric_functions#Sum_and_difference_formulas
+        let x = F64::from(1.0f64.to_degrees());
+        let y = F64::from(3.0f64.to_degrees());
+        let one = F64::from(1);
+        assert_similar(
+            sind_f64(x + y),
+            sind_f64(x) * cosd_f64(y) + cosd_f64(x) * sind_f64(y),
+        );
+        assert_similar(
+            cosd_f64(x + y),
+            cosd_f64(x) * cosd_f64(y) - sind_f64(x) * sind_f64(y),
+        );
+        assert_similar(
+            tand_f64(x + y),
+            (tand_f64(x) + tand_f64(y)) / (one - tand_f64(x) * tand_f64(y)),
+        );
+    }
+
+    #[test]
+    fn test_inverse_trigonometric_degree_funcs() {
+        let x = F64::from(1);
+        let y = F64::from(3);
+        let two = F64::from(2);
+        // https://en.wikipedia.org/wiki/Inverse_trigonometric_functions#Relationships_between_trigonometric_functions_and_inverse_trigonometric_functions
+        assert_similar(x, sind_f64(asind_f64(x)));
+        assert_similar(x, cosd_f64(acosd_f64(x)));
+        assert_similar(x, tand_f64(atand_f64(x)));
+        // https://en.wikipedia.org/wiki/Inverse_trigonometric_functions#Two-argument_variant_of_arctangent
+        assert_similar(
+            atan2d_f64(y, x),
+            two * atand_f64(y / (F64::from(F64::from(x.powi(2) + y.powi(2)).sqrt()) + x)),
+        )
     }
 }
