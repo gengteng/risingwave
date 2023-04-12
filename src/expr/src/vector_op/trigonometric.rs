@@ -109,6 +109,7 @@ pub fn atan2d_f64(input_x: F64, input_y: F64) -> F64 {
 
 #[cfg(test)]
 mod tests {
+
     use risingwave_common::types::F64;
 
     use crate::vector_op::trigonometric::*;
@@ -116,7 +117,7 @@ mod tests {
     /// numbers are equal within a rounding error
     fn assert_similar(lhs: F64, rhs: F64) {
         let x = F64::from(lhs.abs() - rhs.abs()).abs() <= 0.000000000000001;
-        assert!(x, "{lhs} is not similar to {rhs}");
+        assert!(x);
     }
 
     #[test]

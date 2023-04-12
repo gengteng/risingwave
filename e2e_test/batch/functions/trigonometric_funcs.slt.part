@@ -274,7 +274,7 @@ SELECT acosd(-1.1)
 NaN
 
 query R
-SELECT abs(atan(-1.1) - degrees(-0.8329812666744317)) < 0.000000000000001
+SELECT abs(atand(-1.1) - degrees(-0.8329812666744317)) < 0.000000000000001
 ----
 t
 
